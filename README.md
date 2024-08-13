@@ -51,10 +51,6 @@ func main() {
 
 For more examples, see the `writerat-pipe_test.go` file.
 
-## Use Case
-
-This library was created to support piping the output of the AWS SDK's `s3manager.Downloader` to an `s3manager.Uploader` without having to rely on a file or excessive memory usage.
-
 ## Caveats
 
 The following caveats apply to this implementation:

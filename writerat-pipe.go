@@ -59,10 +59,6 @@ type WriterAtPipeWriter struct {
 // ErrOffsetLessThanConsumed is returned when a write is attempted at an offset less than the offset that has already been consumed by the reader.
 var ErrOffsetLessThanConsumed = errors.New("tried to write at offset less than the offset that has already been consumed")
 
-// ErrMissingChunk is returned when a read is attempted from a chunk that does not exist
-// This should never happen, and indicates a bug in writerat-pipe's implementation.
-var ErrMissingChunk = errors.New("tried to read from an internal chunk that does not exist (bug in writerat-pipe)")
-
 // ErrChunkHasNoMarkers is returned when a read is attempted from a chunk that has no markers.
 // This should never happen, and indicates a bug in writerat-pipe's implementation.
 var ErrChunkHasNoMarkers = errors.New("tried to read from a chunk that has no markers (bug in writerat-pipe)")

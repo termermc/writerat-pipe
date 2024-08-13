@@ -3,7 +3,15 @@ Implementation of Go's `io.Pipe` whose writer implements `io.WriterAt`, with som
 
 It can be thought of as a normal pipe, except with a buffered writer that implements `io.WriterAt`.
 
-## Example
+Read the [documentation](https://pkg.go.dev/github.com/termermc/writerat-pipe) for more information.
+
+## Installation
+
+```shell
+go get github.com/termermc/writerat-pipe
+```
+
+## Usage
 
 ```go
 package main

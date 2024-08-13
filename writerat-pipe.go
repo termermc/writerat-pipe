@@ -282,6 +282,12 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 	// We only want to return EOF on a closed pipe if we have read all possible bytes
 	if isClosed && (alreadyRead < totalToRead) {
 		resErr = io.EOF
+
+		// Since everything has been read, we can free all chunks.
+		// No need to lock since no writes can happen when the pipe is closed.
+		for chunkKey := range r.pipe.chunks {
+			delete(r.pipe.chunks, chunkKey)
+		}
 	}
 
 	return alreadyRead, resErr

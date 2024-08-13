@@ -390,7 +390,7 @@ func TestRead1MiB(t *testing.T) {
 	reconstructed := make([]byte, len(toWrite)+1)
 	totalRead := 0
 
-	// Read as much as possible
+	// Read as much as possible without blocking
 	readBuf := make([]byte, 1024)
 	for totalRead < len(firstHalf) {
 		n, err := reader.Read(readBuf)
@@ -401,10 +401,6 @@ func TestRead1MiB(t *testing.T) {
 		}
 
 		if err != nil {
-			if err == io.EOF {
-				break
-			}
-
 			t.Fatal(err)
 		}
 	}
@@ -426,7 +422,7 @@ func TestRead1MiB(t *testing.T) {
 	_ = writer.Close()
 
 	// Read as much as possible
-	for totalRead < len(firstHalf)+len(secondHalf) {
+	for {
 		n, err := reader.Read(readBuf)
 
 		if n > 0 {
@@ -463,10 +459,192 @@ func TestRead1MiB(t *testing.T) {
 	}
 }
 
-// TODO Test big, multi-chunk reads
+func TestRead1MiBWithMultiChunkReads(t *testing.T) {
+	reader, writer := WriterAtPipe()
 
-// TODO TestBehavesLikeIoPipe
-// General behavioral tests.
+	toWrite := genBytes(1024 * 1024)
+	firstHalf := toWrite[:len(toWrite)/2]
+	secondHalf := toWrite[len(toWrite)/2:]
 
-// TODO TestOffsetWritesWithChunkGaps
-// This checks whether writes at offsets that leaves gaps between written chunks are handled properly.
+	// Write first half
+	n, err := writer.WriteAt(firstHalf, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(firstHalf) {
+		t.Fatalf("Expected to write %d bytes, but wrote %d", len(firstHalf), n)
+	}
+
+	reconstructed := make([]byte, len(toWrite)+1)
+
+	n, err = reader.Read(reconstructed[:len(firstHalf)])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect to have read firstHalf
+	if !bytes.Equal(reconstructed[:n], firstHalf) {
+		t.Fatalf("Expected to read first half (%d bytes), but read %d bytes", len(firstHalf), n)
+	}
+
+	// Write second half
+	n, err = writer.WriteAt(secondHalf, int64(len(firstHalf)))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(secondHalf) {
+		t.Fatalf("Expected to write %d bytes, but wrote %d", len(secondHalf), n)
+	}
+
+	n, err = reader.Read(reconstructed[len(firstHalf) : len(reconstructed)-1])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Expect to have read everything
+	if !bytes.Equal(reconstructed[:len(reconstructed)-1], toWrite) {
+		t.Fatalf("Expected to read everything (%d bytes), but read %d bytes", len(toWrite), n)
+	}
+
+	// The last byte in reconstructed should be 0, because it was not written.
+	if reconstructed[len(reconstructed)-1] != 0 {
+		t.Fatalf("Expected last byte to be 0, but it was %d", reconstructed[len(reconstructed)-1])
+	}
+
+	_ = writer.Close()
+
+	// All chunks except optionally the last (because it was not full) should be freed.
+	numChunks := 0
+	for range reader.pipe.chunks {
+		numChunks++
+	}
+	if numChunks > 1 {
+		t.Fatalf("Expected that all but 1 or 0 chunks were freed, but there were %d chunks", numChunks)
+	}
+}
+
+func TestOffsetsLessThanConsumedError(t *testing.T) {
+	reader, writer := WriterAtPipe()
+
+	const toWrite = "Hello, world!"
+
+	n, err := writer.WriteAt([]byte(toWrite), 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(toWrite) {
+		t.Fatalf("Expected to write %d bytes, but wrote %d", len(toWrite), n)
+	}
+
+	readBuf := make([]byte, 1024)
+	_, err = reader.Read(readBuf[:len(toWrite)])
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// Write at offset less than consumed
+	_, err = writer.WriteAt([]byte("Test"), 0)
+	if !errors.Is(err, ErrOffsetLessThanConsumed) {
+		t.Fatalf("Expected to get ErrOffsetLessThanConsumed, but got %v", err)
+	}
+}
+
+func TestOffsetWritesWithChunkGaps(t *testing.T) {
+	reader, writer := WriterAtPipe()
+
+	fullChunk := genBytes(int(chunkSize))
+	almostFullChunk := genBytes(int(chunkSize) - 10)
+	almostEmptyChunk := genBytes(10)
+
+	errChan := make(chan error)
+	go func() {
+		time.Sleep(time.Millisecond * 100)
+
+		n, err := writer.WriteAt(almostFullChunk, 0)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		if n != len(almostFullChunk) {
+			errChan <- fmt.Errorf("expected to write %d bytes, but wrote %d", len(almostFullChunk), n)
+			return
+		}
+
+		// Leave full chunk gap
+		n, err = writer.WriteAt(almostFullChunk, int64(chunkSize)*2)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		if n != len(almostFullChunk) {
+			errChan <- fmt.Errorf("expected to write %d bytes, but wrote %d", len(almostFullChunk), n)
+			return
+		}
+
+		time.Sleep(time.Millisecond * 100)
+
+		// Fill in gap
+		n, err = writer.WriteAt(fullChunk, int64(chunkSize)*1)
+		if err != nil {
+			errChan <- err
+			return
+		}
+		if n != len(fullChunk) {
+			errChan <- fmt.Errorf("expected to write %d bytes, but wrote %d", len(fullChunk), n)
+			return
+		}
+		n, err = writer.WriteAt(almostEmptyChunk, int64(len(almostFullChunk)))
+		if err != nil {
+			errChan <- err
+			return
+		}
+		if n != len(almostEmptyChunk) {
+			errChan <- fmt.Errorf("expected to write %d bytes, but wrote %d", len(almostEmptyChunk), n)
+			return
+		}
+
+		_ = writer.Close()
+
+		errChan <- nil
+	}()
+
+	readBuf := make([]byte, int(chunkSize)*3)
+
+	// Consume first almost full chunk
+	n, err := reader.Read(readBuf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != len(almostFullChunk) {
+		t.Fatalf("Expected to read %d bytes, but read %d", len(almostFullChunk), n)
+	}
+	if !bytes.Equal(almostFullChunk, readBuf[:n]) {
+		t.Fatalf("Did not get expected data from first chunk read")
+	}
+
+	if !bytes.Equal(almostFullChunk, readBuf[:n]) {
+		t.Fatalf("Did not get expected data from first chunk read")
+	}
+
+	// Consume everything else
+	n, err = reader.Read(readBuf)
+	if err == nil {
+		t.Fatal("Expected to get an io.EOF error, but got nil")
+	} else if !errors.Is(err, io.EOF) {
+		t.Fatalf("Expected to get an io.EOF error, but got %v", err)
+	}
+	expectCount := len(almostEmptyChunk) + len(fullChunk) + len(almostFullChunk)
+	if n != expectCount {
+		t.Fatalf("Expected to read %d bytes, but read %d", expectCount, n)
+	}
+
+	expectBytes := append(append(almostEmptyChunk, fullChunk...), almostFullChunk...)
+
+	if !bytes.Equal(expectBytes, readBuf[:n]) {
+		t.Fatalf("Got wrong bytes for the rest of the pipe")
+	}
+
+	if err := <-errChan; err != nil {
+		t.Fatal(err)
+	}
+}

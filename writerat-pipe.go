@@ -73,18 +73,35 @@ var ErrChunkHasNoMarkers = errors.New("tried to read from a chunk that has no ma
 //
 // Writes at offsets less than the offset that has already been consumed by the reader will result in an ErrOffsetLessThanConsumed error.
 func (w *WriterAtPipeWriter) WriteAt(p []byte, off int64) (n int, err error) {
+	w.r.pipe.mutex.Lock()
 	if w.r.pipe.isClosed {
+		w.r.pipe.mutex.Unlock()
 		return 0, io.ErrClosedPipe
 	}
+	w.r.pipe.mutex.Unlock()
 
 	totalToWrite := len(p)
 	if totalToWrite == 0 {
 		return 0, nil
 	}
 
+	written := 0
+
 	// Synchronize writes
 	w.r.pipe.mutex.Lock()
-	defer w.r.pipe.mutex.Unlock()
+
+	// After everything is done, unlock the mutex and notify readers
+	defer func() {
+		w.r.pipe.mutex.Unlock()
+
+		if written > 0 {
+			// If there is a waiting read call, notify it that there are possibly new bytes to read.
+			select {
+			case w.r.pipe.hasBytesChan <- struct{}{}:
+			default:
+			}
+		}
+	}()
 
 	consumed := w.r.pipe.consumed
 	if uint64(off) < consumed {
@@ -93,7 +110,6 @@ func (w *WriterAtPipeWriter) WriteAt(p []byte, off int64) (n int, err error) {
 
 	// Figure out which chunk this write begins in
 	chunkKey := uint64(math.Floor(float64(off) / float64(chunkSize)))
-	written := 0
 	for written < totalToWrite {
 		// Create the chunk if it does not exist
 		var chunk *pipeChunk
@@ -108,22 +124,23 @@ func (w *WriterAtPipeWriter) WriteAt(p []byte, off int64) (n int, err error) {
 		// Only the first chunk will have an offset, everything else is just a normal sequential write
 		var offsetInChunk uint16
 		if written == 0 {
-			offsetInChunk = uint16(off) % chunkSize
+			offsetInChunk = uint16(off % int64(chunkSize))
 		} else {
 			offsetInChunk = 0
 		}
 
 		// Calculate total bytes in the chunk to write
 		var writeUntil uint16
-		if uint16(totalToWrite) < chunkSize {
-			writeUntil = uint16(totalToWrite)
+		leftToWrite := totalToWrite - written
+		if int(offsetInChunk)+leftToWrite < int(chunkSize) {
+			writeUntil = offsetInChunk + uint16(leftToWrite)
 		} else {
 			writeUntil = chunkSize
 		}
 
 		// Write the chunk
-		copy(chunk.data[offsetInChunk:], p[written:writeUntil])
-		writtenInChunk := writeUntil
+		writtenInChunk := writeUntil - offsetInChunk
+		copy(chunk.data[offsetInChunk:], p[written:written+int(writtenInChunk)])
 		written += int(writtenInChunk)
 
 		// Create the marker
@@ -167,12 +184,6 @@ func (w *WriterAtPipeWriter) WriteAt(p []byte, off int64) (n int, err error) {
 		chunkKey++
 	}
 
-	// Notify the reader that there are possibly new bytes to read.
-	select {
-	case w.r.pipe.hasBytesChan <- struct{}{}:
-	default:
-	}
-
 	return written, nil
 }
 
@@ -194,17 +205,14 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 	alreadyRead := 0
 
 	for alreadyRead < 1 {
-		// Wait for readable bytes if not closed.
-		// We still perform the read step here even if the pipe is closed because we need to try consuming readable buffered bytes.
-		if !isClosed {
-			<-r.pipe.hasBytesChan
-		}
-
-		// Lock while reading
+		// Stop writes while reading contiguous bytes
 		r.pipe.mutex.Lock()
 
-		// Read from the pipe
+		// Read as many contiguous bytes as possible
+		readThisTry := 0
 		for alreadyRead < totalToRead {
+			readThisTry = 0
+
 			// Read the next chunk
 			chunkKey := uint64(math.Floor(float64(r.pipe.consumed) / float64(chunkSize)))
 			chunk, chunkExists := r.pipe.chunks[chunkKey]
@@ -216,6 +224,7 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 
 			if len(chunk.markers) == 0 {
 				// Chunks should always have at least one marker, so this is a bug in writerat-pipe.
+				r.pipe.mutex.Unlock()
 				return 0, ErrChunkHasNoMarkers
 			}
 
@@ -229,6 +238,12 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 				if marker.offset <= startOffsetInChunk && marker.offset+marker.length > startOffsetInChunk {
 					startByte = startOffsetInChunk
 					endByte = marker.offset + marker.length
+
+					// Make sure the amount to read in this chunk does not exceed the amount we have left to read
+					if int(endByte-startByte) > totalToRead-alreadyRead {
+						endByte = startByte + uint16(totalToRead-alreadyRead)
+					}
+
 					break
 				}
 			}
@@ -248,17 +263,28 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 
 			r.pipe.consumed += uint64(endByte - startByte)
 			alreadyRead += int(endByte - startByte)
+			readThisTry = int(endByte - startByte)
 		}
+
+		// Update isClosed and shouldWait before releasing the lock so that they are up to date
+		isClosed = r.pipe.isClosed
+		shouldWait := alreadyRead == 0 && !isClosed
 
 		r.pipe.mutex.Unlock()
 
-		if isClosed {
+		if shouldWait {
+			// Nothing was read but the pipe is still open, so we need to wait for bytes to be written and then try again
+			<-r.pipe.hasBytesChan
+		} else if readThisTry < 1 {
+			// There were some bytes read or the pipe was closed, so there is no need to try again; return with the bytes we have read
 			break
 		}
 	}
 
 	var resErr error
-	if isClosed {
+
+	// We only want to return EOF on a closed pipe if we have read all possible bytes
+	if isClosed && (alreadyRead < totalToRead) {
 		resErr = io.EOF
 	}
 

@@ -36,21 +36,17 @@ func TestBasicPipeline(t *testing.T) {
 	wroteBytesChan := make(chan int)
 	errChan := make(chan error)
 	go func() {
-		println("Writing...")
 		n, err := writer.WriteAt([]byte(toWrite), 0)
 		if err != nil {
 			errChan <- err
 			return
 		}
-		println("Wrote")
 
 		wroteBytesChan <- n
 	}()
 
 	readBuf := make([]byte, 1024)
-	println("Reading...")
 	n, err := reader.Read(readBuf)
-	println("Read")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -139,7 +135,7 @@ func TestCheckeredWrites(t *testing.T) {
 
 	errChan := make(chan error)
 	go func() {
-		time.Sleep(time.Millisecond * 1000)
+		time.Sleep(time.Millisecond * 100)
 
 		// O...
 		n, err := writer.WriteAt([]byte(toWrite1), 0)
@@ -152,7 +148,7 @@ func TestCheckeredWrites(t *testing.T) {
 			return
 		}
 
-		time.Sleep(time.Millisecond * 1000)
+		time.Sleep(time.Millisecond * 100)
 
 		// ...O
 		n, err = writer.WriteAt([]byte(toWrite2), writeSize*3)
@@ -645,5 +641,70 @@ func TestOffsetWritesWithChunkGaps(t *testing.T) {
 
 	if err := <-errChan; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManyConcurrentWrites(t *testing.T) {
+	const tries = 100
+	const writes = 100
+
+	// Time it
+	startTime := time.Now()
+
+	for tryId := 0; tryId < tries; tryId++ {
+		reader, writer := WriterAtPipe()
+
+		errChan := make(chan error)
+
+		const toWrite = "Hello, world!"
+
+		for i := 0; i < writes; i++ {
+			offset := int64(i) * int64(len(toWrite))
+
+			go func() {
+				n, err := writer.WriteAt([]byte(toWrite), offset)
+				if err != nil {
+					errChan <- err
+					return
+				}
+				if n != len(toWrite) {
+					errChan <- fmt.Errorf("expected to write %d bytes, but wrote %d", len(toWrite), n)
+					return
+				}
+
+				errChan <- nil
+			}()
+		}
+
+		for i := 0; i < writes; i++ {
+			err := <-errChan
+			if err != nil {
+				t.Fatal(err)
+			}
+		}
+
+		for i := 0; i < int(writes/chunkSize); i++ {
+			_, hasChunk := reader.pipe.chunks[uint64(i)]
+			if !hasChunk {
+				t.Fatalf("Expected to have chunk %d, but it was missing", i)
+			}
+		}
+
+		readBuf := make([]byte, len(toWrite)*writes)
+		n, err := reader.Read(readBuf)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if n != len(toWrite)*writes {
+			t.Fatalf("Expected to read %d bytes, but read %d", len(toWrite)*writes, n)
+		}
+
+		_ = writer.Close()
+	}
+
+	elapsed := time.Since(startTime)
+
+	if elapsed.Milliseconds() > 100 {
+		t.Fatalf("Performing %d concurrent writes and then sequential read took over 100ms. Implementation is too slow.", tries*writes)
 	}
 }

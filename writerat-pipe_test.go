@@ -2,7 +2,6 @@ package writerat_pipe
 
 import (
 	"bytes"
-	"errors"
 	"fmt"
 	"io"
 	"testing"
@@ -306,7 +305,7 @@ func TestCloseByReader(t *testing.T) {
 	const toWrite = "Hello, world!"
 
 	_, err := writer.WriteAt([]byte(toWrite), 0)
-	if !errors.Is(err, io.ErrClosedPipe) {
+	if err != io.ErrClosedPipe {
 		if err == nil {
 			t.Fatalf("Expected to get ErrClosedPipe, but got nil")
 		} else {
@@ -353,7 +352,7 @@ func TestCloseByReaderAfterBytesRead(t *testing.T) {
 	_ = reader.Close()
 
 	_, err = writer.WriteAt([]byte(toWrite), 0)
-	if !errors.Is(err, io.ErrClosedPipe) {
+	if err != io.ErrClosedPipe {
 		if err == nil {
 			t.Fatalf("Expected to get ErrClosedPipe, but got nil")
 		} else {
@@ -544,7 +543,7 @@ func TestOffsetsLessThanConsumedError(t *testing.T) {
 
 	// Write at offset less than consumed
 	_, err = writer.WriteAt([]byte("Test"), 0)
-	if !errors.Is(err, ErrOffsetLessThanConsumed) {
+	if err != ErrOffsetLessThanConsumed {
 		t.Fatalf("Expected to get ErrOffsetLessThanConsumed, but got %v", err)
 	}
 }
@@ -630,7 +629,7 @@ func TestOffsetWritesWithChunkGaps(t *testing.T) {
 	n, err = reader.Read(readBuf)
 	if err == nil {
 		t.Fatal("Expected to get an io.EOF error, but got nil")
-	} else if !errors.Is(err, io.EOF) {
+	} else if err != io.EOF {
 		t.Fatalf("Expected to get an io.EOF error, but got %v", err)
 	}
 	expectCount := len(almostEmptyChunk) + len(fullChunk) + len(almostFullChunk)

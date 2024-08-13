@@ -10,14 +10,15 @@ import (
 
 // chunkRegionMarker is a marker for a region of data that has been written in a pipeChunk
 type chunkRegionMarker struct {
-	offset uint16
-	length uint16
+	offset uint64
+	length uint64
 }
 
-const chunkSize = uint16(65535)
+// DefaultChunkSize is the default chunk size used by WriterAtPipe.
+const DefaultChunkSize = uint64(1024 * 1024)
 
 // pipeChunk is a chunk of data that has been written to a WriterAtPipe.
-// Chunks can be a max of 65535 bytes because their length is stored in a uint16.
+// Chunks can be a max of chunkSize bytes because their length is stored in a uint64.
 // A small chunk size was chosen to keep markers short and to avoid making too many micro-allocations.
 type pipeChunk struct {
 	// The underlying data.
@@ -44,8 +45,11 @@ type writerAtPipe struct {
 	// Requires mutex.
 	consumed uint64
 
+	// The size of each chunk.
+	chunkSize uint64
+
 	// Map of chunks and their offsets.
-	// Offsets are multiples of 65535.
+	// Offsets are multiples of chunkSize.
 	chunks map[uint64]*pipeChunk
 }
 
@@ -105,33 +109,33 @@ func (w *WriterAtPipeWriter) WriteAt(p []byte, off int64) (n int, err error) {
 	}
 
 	// Figure out which chunk this write begins in
-	chunkKey := uint64(math.Floor(float64(off) / float64(chunkSize)))
+	chunkKey := uint64(math.Floor(float64(off) / float64(w.r.pipe.chunkSize)))
 	for written < totalToWrite {
 		// Create the chunk if it does not exist
 		var chunk *pipeChunk
 		var chunkExists bool
 		if chunk, chunkExists = w.r.pipe.chunks[chunkKey]; !chunkExists {
 			chunk = &pipeChunk{
-				data: make([]byte, chunkSize),
+				data: make([]byte, w.r.pipe.chunkSize),
 			}
 			w.r.pipe.chunks[chunkKey] = chunk
 		}
 
 		// Only the first chunk will have an offset, everything else is just a normal sequential write
-		var offsetInChunk uint16
+		var offsetInChunk uint64
 		if written == 0 {
-			offsetInChunk = uint16(off % int64(chunkSize))
+			offsetInChunk = uint64(off % int64(w.r.pipe.chunkSize))
 		} else {
 			offsetInChunk = 0
 		}
 
 		// Calculate total bytes in the chunk to write
-		var writeUntil uint16
+		var writeUntil uint64
 		leftToWrite := totalToWrite - written
-		if int(offsetInChunk)+leftToWrite < int(chunkSize) {
-			writeUntil = offsetInChunk + uint16(leftToWrite)
+		if int(offsetInChunk)+leftToWrite < int(w.r.pipe.chunkSize) {
+			writeUntil = offsetInChunk + uint64(leftToWrite)
 		} else {
-			writeUntil = chunkSize
+			writeUntil = w.r.pipe.chunkSize
 		}
 
 		// Write the chunk
@@ -210,7 +214,7 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 			readThisTry = 0
 
 			// Read the next chunk
-			chunkKey := uint64(math.Floor(float64(r.pipe.consumed) / float64(chunkSize)))
+			chunkKey := uint64(math.Floor(float64(r.pipe.consumed) / float64(r.pipe.chunkSize)))
 			chunk, chunkExists := r.pipe.chunks[chunkKey]
 			if !chunkExists {
 				// The chunk we need does not exist, so we need to wait for it to be written.
@@ -224,10 +228,10 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 				return 0, ErrChunkHasNoMarkers
 			}
 
-			startOffsetInChunk := uint16(r.pipe.consumed % uint64(chunkSize))
+			startOffsetInChunk := r.pipe.consumed % r.pipe.chunkSize
 
-			var startByte uint16
-			var endByte uint16
+			var startByte uint64
+			var endByte uint64
 
 			// Find marker that intersects with the start offset
 			for _, marker := range chunk.markers {
@@ -237,7 +241,7 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 
 					// Make sure the amount to read in this chunk does not exceed the amount we have left to read
 					if int(endByte-startByte) > totalToRead-alreadyRead {
-						endByte = startByte + uint16(totalToRead-alreadyRead)
+						endByte = startByte + uint64(totalToRead-alreadyRead)
 					}
 
 					break
@@ -253,11 +257,11 @@ func (r *WriterAtPipeReader) Read(p []byte) (n int, err error) {
 			copy(p[alreadyRead:], chunk.data[startByte:endByte])
 
 			// If the chunk was fully consumed, remove it
-			if endByte >= chunkSize {
+			if endByte >= r.pipe.chunkSize {
 				delete(r.pipe.chunks, chunkKey)
 			}
 
-			r.pipe.consumed += uint64(endByte - startByte)
+			r.pipe.consumed += endByte - startByte
 			alreadyRead += int(endByte - startByte)
 			readThisTry = int(endByte - startByte)
 		}
@@ -325,6 +329,17 @@ func (w *WriterAtPipeWriter) Close() error {
 	return w.r.Close()
 }
 
+// WriterAtPipeWithChunkSize is the same as WriterAtPipe, but with a custom buffer chunk size.
+func WriterAtPipeWithChunkSize(chunkSize uint64) (*WriterAtPipeReader, *WriterAtPipeWriter) {
+	pw := &WriterAtPipeWriter{r: WriterAtPipeReader{pipe: writerAtPipe{
+		chunks:       make(map[uint64]*pipeChunk),
+		hasBytesChan: make(chan struct{}, 1),
+		chunkSize:    chunkSize,
+	}}}
+
+	return &pw.r, pw
+}
+
 // WriterAtPipe returns a pair of Reader and Writer which can be used to write to a pipe.
 // It functions similarly to io.Pipe, but with the following differences:
 //   - Writes are buffered and do not wait on the reader.
@@ -336,10 +351,5 @@ func (w *WriterAtPipeWriter) Close() error {
 // For example, if there is a write 100 byte at offset 0, the reader reads 50 bytes, then the writer attempts to write 10 bytes at offset 30, it will fail.
 // This is because 50 bytes have already been consumed, so all writes from that point cannot be at an offset less than 50.
 func WriterAtPipe() (*WriterAtPipeReader, *WriterAtPipeWriter) {
-	pw := &WriterAtPipeWriter{r: WriterAtPipeReader{pipe: writerAtPipe{
-		chunks:       make(map[uint64]*pipeChunk),
-		hasBytesChan: make(chan struct{}, 1),
-	}}}
-
-	return &pw.r, pw
+	return WriterAtPipeWithChunkSize(DefaultChunkSize)
 }

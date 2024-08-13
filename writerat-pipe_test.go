@@ -8,6 +8,8 @@ import (
 	"time"
 )
 
+const chunkSize = DefaultChunkSize
+
 // Generates a byte slice of the given length.
 // Each value is 1-255, starting from 1 and incrementing each byte.
 // If the value exceeds 255, it will reset to 1.
@@ -29,7 +31,7 @@ func genBytes(len int) []byte {
 }
 
 func TestBasicPipeline(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const toWrite = "Hello, world!"
 
@@ -70,7 +72,7 @@ func TestBasicPipeline(t *testing.T) {
 }
 
 func TestWaitForContiguous(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const toWrite1 = "Hello, world!"
 	const toWrite2 = "Hi, "
@@ -122,7 +124,7 @@ func TestWaitForContiguous(t *testing.T) {
 }
 
 func TestCheckeredWrites(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const writeSize = 5
 	const toWrite1 = "part1"
@@ -223,7 +225,7 @@ func TestCheckeredWrites(t *testing.T) {
 }
 
 func TestReadAfterClose(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const toWrite = "Hello, world!"
 
@@ -251,7 +253,7 @@ func TestReadAfterClose(t *testing.T) {
 }
 
 func TestReadAfterCloseWithLostBytes(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const toWrite = "Hello, world!"
 	const toLose = "Test"
@@ -294,7 +296,7 @@ func TestReadAfterCloseWithLostBytes(t *testing.T) {
 }
 
 func TestCloseByReader(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	_ = reader.Close()
 
@@ -321,7 +323,7 @@ func TestCloseByReader(t *testing.T) {
 }
 
 func TestCloseByReaderAfterBytesRead(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const toWrite = "Hello, world!"
 
@@ -367,7 +369,7 @@ func TestCloseByReaderAfterBytesRead(t *testing.T) {
 }
 
 func TestRead1MiB(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	toWrite := genBytes(1024 * 1024)
 	firstHalf := toWrite[:len(toWrite)/2]
@@ -455,7 +457,7 @@ func TestRead1MiB(t *testing.T) {
 }
 
 func TestRead1MiBWithMultiChunkReads(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	toWrite := genBytes(1024 * 1024)
 	firstHalf := toWrite[:len(toWrite)/2]
@@ -519,7 +521,7 @@ func TestRead1MiBWithMultiChunkReads(t *testing.T) {
 }
 
 func TestOffsetsLessThanConsumedError(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	const toWrite = "Hello, world!"
 
@@ -545,7 +547,7 @@ func TestOffsetsLessThanConsumedError(t *testing.T) {
 }
 
 func TestOffsetWritesWithChunkGaps(t *testing.T) {
-	reader, writer := WriterAtPipe()
+	reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 	fullChunk := genBytes(int(chunkSize))
 	almostFullChunk := genBytes(int(chunkSize) - 10)
@@ -652,7 +654,7 @@ func TestManyConcurrentWrites(t *testing.T) {
 	startTime := time.Now()
 
 	for tryId := 0; tryId < tries; tryId++ {
-		reader, writer := WriterAtPipe()
+		reader, writer := WriterAtPipeWithChunkSize(chunkSize)
 
 		errChan := make(chan error)
 

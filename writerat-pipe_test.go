@@ -704,7 +704,7 @@ func TestManyConcurrentWrites(t *testing.T) {
 
 	elapsed := time.Since(startTime)
 
-	if elapsed.Milliseconds() > 100 {
+	if elapsed/1e6 > 100 {
 		t.Fatalf("Performing %d concurrent writes and then sequential read took over 100ms. Implementation is too slow.", tries*writes)
 	}
 }
